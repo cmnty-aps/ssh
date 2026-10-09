@@ -1,0 +1,8 @@
+{
+  "name": "Remix SSH Flow u9",
+  "description": "A seamless, secure web-based SSH client for managing your servers directly from your browser.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
