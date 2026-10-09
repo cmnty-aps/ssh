@@ -19,16 +19,19 @@ import {
   Menu,
   Pencil,
   LogIn,
+  AlertCircle,
+  CheckCircle2,
 } from 'lucide-react';
 import {
   SshHost,
   SshKeyItem,
   SshSnippet,
   TerminalSession,
+  DistroType,
   INITIAL_HOSTS,
   INITIAL_KEYS,
   INITIAL_SNIPPETS,
-  parseSshConnectionString,
+  validateQuickConnectInput,
 } from '@/lib/ssh-workspace';
 import DistroIcon from '@/components/distro-icon';
 import TerminalWorkspace from '@/components/terminal-workspace';
@@ -42,15 +45,12 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('hosts');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Core Real-Time State
   const [hosts, setHosts] = useState<SshHost[]>(INITIAL_HOSTS);
   const [keys, setKeys] = useState<SshKeyItem[]>(INITIAL_KEYS);
   const [snippets, setSnippets] = useState<SshSnippet[]>(INITIAL_SNIPPETS);
 
-  // Selected Host for SFTP
   const [sftpHostId, setSftpHostId] = useState<string>(INITIAL_HOSTS[0].id);
 
-  // Terminal Sessions
   const [sessions, setSessions] = useState<TerminalSession[]>([
     {
       id: 'session-local-1',
@@ -65,15 +65,16 @@ export default function App() {
   ]);
   const [activeSessionId, setActiveSessionId] = useState<string>('session-local-1');
 
-  // Quick Connect & Add Host Modal State
   const [quickConnectInput, setQuickConnectInput] = useState('');
+  const [quickConnectError, setQuickConnectError] = useState<string | null>(null);
   const [showAddHostModal, setShowAddHostModal] = useState(false);
   const [probingHostId, setProbingHostId] = useState<string | null>(null);
+  const [connectingHostId, setConnectingHostId] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [hostSearch, setHostSearch] = useState('');
   const [editingHost, setEditingHost] = useState<SshHost | null>(null);
   const [showMobileQuickConnect, setShowMobileQuickConnect] = useState(false);
 
-  // Add Host Form (Default authMethod: password as requested)
   const [formLabel, setFormLabel] = useState('');
   const [formHostname, setFormHostname] = useState('');
   const [formPort, setFormPort] = useState(22);
@@ -81,10 +82,10 @@ export default function App() {
   const [formAuthMethod, setFormAuthMethod] = useState<'password' | 'key'>('password');
   const [formKeyId, setFormKeyId] = useState<string>(INITIAL_KEYS[0]?.id || '');
   const [formPassword, setFormPassword] = useState('');
+  const [formDistro, setFormDistro] = useState<DistroType | 'auto'>('auto');
   const [formGroup, setFormGroup] = useState<SshHost['group']>('Production');
 
-  // Test Connection / Probe Host
-  const handleProbeHost = async (host: SshHost) => {
+  const handleProbeHost = async (host: SshHost): Promise<boolean> => {
     if (host.isLocalWorkspace) {
       setHosts((prev) =>
         prev.map((h) =>
@@ -97,11 +98,12 @@ export default function App() {
                   latencyMs: 1,
                   banner: 'Debian GNU/Linux 12 (bookworm) — Full PTY (apt, npm, bun, python3, git)',
                 },
+                lastConnected: 'Ready',
               }
             : h
         )
       );
-      return;
+      return true;
     }
 
     setProbingHostId(host.id);
@@ -112,22 +114,31 @@ export default function App() {
         body: JSON.stringify({ host: host.hostname, port: host.port, timeoutMs: 5000 }),
       });
       const data = await res.json();
+      const isReachable = Boolean(data.reachable);
+
       setHosts((prev) =>
         prev.map((h) =>
           h.id === host.id
             ? {
                 ...h,
+                distro:
+                  h.distro && h.distro !== 'linux'
+                    ? h.distro
+                    : (data.detectedDistro as DistroType) || h.distro,
                 probeStatus: {
                   checkedAt: new Date().toLocaleTimeString(),
-                  reachable: Boolean(data.reachable),
+                  reachable: isReachable,
                   latencyMs: Number(data.latencyMs) || 0,
                   banner: data.banner || null,
                   error: data.error,
                 },
+                lastConnected: isReachable ? 'Connected' : 'Disconnected',
               }
             : h
         )
       );
+
+      return isReachable;
     } catch (err: unknown) {
       setHosts((prev) =>
         prev.map((h) =>
@@ -141,17 +152,26 @@ export default function App() {
                   banner: null,
                   error: err instanceof Error ? err.message : 'Network error',
                 },
+                lastConnected: 'Disconnected',
               }
             : h
         )
       );
+      return false;
     } finally {
       setProbingHostId(null);
     }
   };
 
-  // Open Terminal for a Host
   const handleOpenHostSession = (host: SshHost) => {
+    const isOnline = Boolean(host.isLocalWorkspace || host.probeStatus?.reachable);
+    if (!isOnline) {
+      setConnectionError(
+        `Akses ditolak: Host "${host.label}" belum terhubung. Pastikan statusnya CONNECTED sebelum membuka terminal.`
+      );
+      return;
+    }
+
     const newSessionId = `session-${Date.now()}`;
     const newSession: TerminalSession = {
       id: newSessionId,
@@ -181,7 +201,26 @@ export default function App() {
     );
   };
 
-  // Execute Shell Command
+  const handleConnectHost = async (host: SshHost) => {
+    setConnectionError(null);
+    if (host.isLocalWorkspace || host.probeStatus?.reachable) {
+      handleOpenHostSession(host);
+      return;
+    }
+
+    setConnectingHostId(host.id);
+    const reachable = await handleProbeHost(host);
+    setConnectingHostId(null);
+
+    if (reachable) {
+      handleOpenHostSession(host);
+    } else {
+      setConnectionError(
+        `Gagal terhubung ke "${host.label}" (${host.hostname}:${host.port}). Periksa alamat IP, port SSH, dan firewall.`
+      );
+    }
+  };
+
   const handleExecuteCommand = async (sessionId: string, command: string) => {
     const session = sessions.find((s) => s.id === sessionId);
     if (!session) return;
@@ -219,7 +258,7 @@ export default function App() {
       return;
     }
 
-    if (trimmed === '^C') {
+    if (trimmed === '^C' || trimmed === '^Z' || trimmed === '^X' || trimmed === '^O') {
       setSessions((prev) =>
         prev.map((s) =>
           s.id === sessionId
@@ -230,7 +269,7 @@ export default function App() {
                   {
                     id: `in-${Date.now()}`,
                     type: 'input',
-                    text: '^C',
+                    text: trimmed,
                     timestamp: nowTime,
                     cwd: s.cwd,
                   },
@@ -242,7 +281,6 @@ export default function App() {
       return;
     }
 
-    // Append input line
     setSessions((prev) =>
       prev.map((s) =>
         s.id === sessionId
@@ -266,7 +304,6 @@ export default function App() {
 
     try {
       if (host.isLocalWorkspace) {
-        // Real local Linux/Node.js shell execution
         const res = await fetch('/api/terminal/exec', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -321,7 +358,6 @@ export default function App() {
           })
         );
       } else {
-        // Real remote SSH execution via ssh2
         const selectedKey = keys.find((k) => k.id === host.keyId);
         const res = await fetch('/api/ssh/exec', {
           method: 'POST',
@@ -406,20 +442,43 @@ export default function App() {
   };
 
   const handleCloseSession = (sessionId: string) => {
-    if (sessions.length <= 1) return;
     const remaining = sessions.filter((s) => s.id !== sessionId);
-    setSessions(remaining);
-    if (activeSessionId === sessionId) {
-      setActiveSessionId(remaining[0].id);
+    if (remaining.length === 0) {
+      const fallbackSession: TerminalSession = {
+        id: `session-${Date.now()}`,
+        hostId: 'host-local',
+        title: 'root@localhost',
+        cwd: '/root',
+        connected: true,
+        connecting: false,
+        history: [],
+        lines: [],
+      };
+      setSessions([fallbackSession]);
+      setActiveSessionId(fallbackSession.id);
+    } else {
+      setSessions(remaining);
+      if (activeSessionId === sessionId) {
+        setActiveSessionId(remaining[0].id);
+      }
     }
   };
 
-  // Quick Connect submit from header bar
-  const handleQuickConnect = (e: React.FormEvent) => {
+  const handleQuickConnect = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!quickConnectInput.trim()) return;
+    setQuickConnectError(null);
+    setConnectionError(null);
 
-    const parsed = parseSshConnectionString(quickConnectInput.trim());
+    const validation = validateQuickConnectInput(quickConnectInput);
+    if (!validation.valid || !validation.parsed) {
+      setQuickConnectError(
+        validation.error ||
+          'Format Quick Connect tidak valid. Contoh yang benar: root@192.168.1.1 atau user@hostname:22'
+      );
+      return;
+    }
+
+    const parsed = validation.parsed;
 
     const newHost: SshHost = {
       id: `host-${Date.now()}`,
@@ -428,17 +487,28 @@ export default function App() {
       port: parsed.port,
       username: parsed.username,
       group: 'Custom',
-      authMethod: 'password', // Default auth method password
+      authMethod: 'password',
       password: parsed.password || undefined,
-      lastConnected: 'Connecting...',
+      lastConnected: 'Menghubungkan host...',
     };
 
     setHosts((prev) => [newHost, ...prev]);
     setQuickConnectInput('');
-    handleOpenHostSession(newHost);
+    setShowMobileQuickConnect(false);
+
+    setConnectingHostId(newHost.id);
+    const reachable = await handleProbeHost(newHost);
+    setConnectingHostId(null);
+
+    if (reachable) {
+      handleOpenHostSession(newHost);
+    } else {
+      setConnectionError(
+        `Host "${newHost.label}" berhasil ditambahkan, namun gagal terhubung (${newHost.hostname}:${newHost.port}).`
+      );
+    }
   };
 
-  // Save new host from manual modal
   const handleAddHost = (e: React.FormEvent) => {
     e.preventDefault();
     if (!formHostname.trim() || !formUsername.trim()) return;
@@ -451,6 +521,7 @@ export default function App() {
       username: formUsername.trim(),
       group: formGroup,
       authMethod: formAuthMethod,
+      distro: formDistro === 'auto' ? undefined : formDistro,
       keyId: formAuthMethod === 'key' ? formKeyId : undefined,
       password: formAuthMethod === 'password' ? formPassword : undefined,
       lastConnected: 'Never',
@@ -463,6 +534,7 @@ export default function App() {
     setFormPort(22);
     setFormUsername('root');
     setFormPassword('');
+    setFormDistro('auto');
   };
 
   const handleStartEditHost = (host: SshHost) => {
@@ -474,6 +546,7 @@ export default function App() {
     setFormAuthMethod(host.authMethod === 'none' ? 'password' : host.authMethod);
     setFormKeyId(host.keyId || keys[0]?.id || '');
     setFormPassword(host.password || '');
+    setFormDistro(host.distro || 'auto');
     setFormGroup(host.group);
   };
 
@@ -491,6 +564,7 @@ export default function App() {
               port: formPort || 22,
               username: formUsername.trim(),
               group: formGroup,
+              distro: formDistro === 'auto' ? undefined : formDistro,
               authMethod: formAuthMethod,
               keyId: formAuthMethod === 'key' ? formKeyId : undefined,
               password: formAuthMethod === 'password' ? formPassword : undefined,
@@ -505,15 +579,15 @@ export default function App() {
     setFormPort(22);
     setFormUsername('root');
     setFormPassword('');
+    setFormDistro('auto');
   };
 
   const handleDeleteHost = (hostId: string) => {
-    if (confirm('Delete this host?')) {
+    if (confirm('Hapus host ini?')) {
       setHosts((prev) => prev.filter((h) => h.id !== hostId));
     }
   };
 
-  // Filter hosts list
   const filteredHosts = hosts.filter((h) => {
     const q = hostSearch.toLowerCase().trim();
     if (!q) return true;
@@ -526,7 +600,6 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-[100dvh] w-full max-w-full bg-black text-white font-sans overflow-hidden select-none min-h-0 min-w-0">
-      {/* Top Navigation Bar */}
       <header className="h-12 border-b border-zinc-800 bg-zinc-950 px-2 sm:px-4 flex items-center justify-between shrink-0 z-20 min-w-0">
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <div className="flex items-center gap-2 font-mono font-semibold text-xs tracking-wider text-white shrink-0">
@@ -534,7 +607,6 @@ export default function App() {
             <span>TERMIUS</span>
           </div>
 
-          {/* Desktop Navigation Tabs */}
           <nav className="hidden md:flex items-center gap-1 ml-4">
             {(
               [
@@ -565,7 +637,6 @@ export default function App() {
           </nav>
         </div>
 
-        {/* Quick Connect Form & Mobile Quick Connect Button */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           <form
             onSubmit={handleQuickConnect}
@@ -574,7 +645,10 @@ export default function App() {
             <input
               type="text"
               value={quickConnectInput}
-              onChange={(e) => setQuickConnectInput(e.target.value)}
+              onChange={(e) => {
+                setQuickConnectInput(e.target.value);
+                if (quickConnectError) setQuickConnectError(null);
+              }}
               placeholder="ssh -p 22 root@host"
               className="bg-transparent text-white placeholder-zinc-500 outline-none w-36 sm:w-48 font-mono text-xs"
             />
@@ -597,11 +671,33 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Workspace Area */}
+      {quickConnectError && (
+        <div className="bg-red-950/70 border-b border-red-500/50 text-red-200 px-3 py-2 text-xs flex items-center justify-between shrink-0 font-mono">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+            <span>{quickConnectError}</span>
+          </div>
+          <button onClick={() => setQuickConnectError(null)} className="p-0.5 hover:text-white">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {connectionError && (
+        <div className="bg-amber-950/60 border-b border-amber-500/50 text-amber-200 px-3 py-2 text-xs flex items-center justify-between shrink-0 font-mono">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+            <span>{connectionError}</span>
+          </div>
+          <button onClick={() => setConnectionError(null)} className="p-0.5 hover:text-white">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       <main className="flex-1 overflow-hidden p-1 sm:p-2.5 md:p-3 bg-black flex flex-col min-h-0 min-w-0">
         {activeTab === 'hosts' && (
           <div className="flex flex-col h-full w-full bg-zinc-950 border border-zinc-800 rounded-none sm:rounded-lg overflow-hidden min-h-0 min-w-0">
-            {/* Hosts Header Bar with Pure Host Search & Add Host */}
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between border-b border-zinc-800 p-2 sm:p-3 bg-zinc-900/60 gap-2 shrink-0 min-w-0 max-w-full">
               <form
                 onSubmit={(e) => e.preventDefault()}
@@ -637,7 +733,6 @@ export default function App() {
               </button>
             </div>
 
-            {/* Hosts Table */}
             <div className="flex-1 overflow-auto min-h-0 min-w-0 max-w-full">
               {filteredHosts.length === 0 ? (
                 <div className="h-48 flex items-center justify-center text-xs text-zinc-500 font-mono">
@@ -655,7 +750,8 @@ export default function App() {
                   </thead>
                   <tbody className="divide-y divide-zinc-900 font-mono">
                     {filteredHosts.map((h) => {
-                      const isProbing = probingHostId === h.id;
+                      const isProbing = probingHostId === h.id || connectingHostId === h.id;
+                      const isOnline = Boolean(h.isLocalWorkspace || h.probeStatus?.reachable);
                       const probe = h.probeStatus;
                       return (
                         <tr
@@ -682,16 +778,18 @@ export default function App() {
                           </td>
                           <td className="py-2.5 px-3 hidden md:table-cell">
                             {isProbing ? (
-                              <span className="flex items-center gap-1 text-zinc-400 text-[11px]">
-                                <Loader2 className="w-3 h-3 animate-spin" /> Probing...
+                              <span className="flex items-center gap-1.5 text-amber-300 text-[11px]">
+                                <Loader2 className="w-3 h-3 animate-spin" /> Menghubungkan host...
+                              </span>
+                            ) : isOnline ? (
+                              <span className="flex items-center gap-1 text-emerald-400 text-[11px]">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+                                <span>Connected ({probe?.latencyMs ?? 1}ms)</span>
                               </span>
                             ) : probe ? (
-                              <span
-                                className={`text-[11px] ${
-                                  probe.reachable ? 'text-zinc-300' : 'text-zinc-500'
-                                }`}
-                              >
-                                {probe.reachable ? `Online (${probe.latencyMs}ms)` : 'Unreachable'}
+                              <span className="flex items-center gap-1 text-zinc-500 text-[11px]">
+                                <span className="w-1.5 h-1.5 rounded-full bg-zinc-600 inline-block" />
+                                <span>Disconnected</span>
                               </span>
                             ) : (
                               <span className="text-zinc-600 text-[11px]">—</span>
@@ -703,7 +801,7 @@ export default function App() {
                                 onClick={() => handleProbeHost(h)}
                                 disabled={isProbing}
                                 className="p-1.5 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors"
-                                title="Probe Port"
+                                title="Sinkronkan status server"
                               >
                                 <RefreshCw
                                   className={`w-3.5 h-3.5 ${isProbing ? 'animate-spin' : ''}`}
@@ -717,11 +815,16 @@ export default function App() {
                                 <Pencil className="w-3.5 h-3.5" />
                               </button>
                               <button
-                                onClick={() => handleOpenHostSession(h)}
+                                onClick={() => handleConnectHost(h)}
+                                disabled={isProbing}
                                 className="px-2.5 py-1 bg-white hover:bg-zinc-200 text-black rounded text-[11px] font-semibold flex items-center gap-1 transition-colors font-sans"
                               >
-                                <TerminalIcon className="w-3 h-3" />
-                                <span>Connect</span>
+                                {isProbing ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <TerminalIcon className="w-3 h-3" />
+                                )}
+                                <span>{isOnline ? 'Open' : 'Connect'}</span>
                               </button>
                               {!h.isLocalWorkspace && (
                                 <button
@@ -751,7 +854,7 @@ export default function App() {
             activeSessionId={activeSessionId}
             snippets={snippets}
             keys={keys}
-            onSelectSession={(id) => setActiveSessionId(id)}
+            onSelectSession={setActiveSessionId}
             onOpenHostSession={handleOpenHostSession}
             onCloseSession={handleCloseSession}
             onExecuteCommand={handleExecuteCommand}
@@ -764,7 +867,7 @@ export default function App() {
             hosts={hosts}
             selectedHostId={sftpHostId}
             keys={keys}
-            onSelectHost={(id) => setSftpHostId(id)}
+            onSelectHost={setSftpHostId}
           />
         )}
 
@@ -781,103 +884,27 @@ export default function App() {
             snippets={snippets}
             onAddSnippet={(s) => setSnippets((prev) => [s, ...prev])}
             onDeleteSnippet={(id) => setSnippets((prev) => prev.filter((s) => s.id !== id))}
-            onRunSnippet={(cmd) => {
-              if (activeSessionId) {
-                setActiveTab('terminal');
-                handleExecuteCommand(activeSessionId, cmd);
-              }
+            onRunSnippet={(command) => {
+              handleExecuteCommand(activeSessionId, command);
+              setActiveTab('terminal');
             }}
           />
         )}
       </main>
 
-      {/* Mobile Bottom Navigation Bar */}
-      <nav className="md:hidden h-12 border-t border-zinc-800 bg-zinc-950 flex items-center justify-around shrink-0 z-30 select-none">
-        {(
-          [
-            { id: 'hosts', label: 'Hosts', icon: Server },
-            { id: 'terminal', label: 'Terminal', icon: TerminalIcon },
-            { id: 'sftp', label: 'Files', icon: FolderTree },
-            { id: 'keys', label: 'Keys', icon: Key },
-            { id: 'snippets', label: 'Snippets', icon: Code },
-          ] as const
-        ).map((tab) => {
-          const Icon = tab.icon;
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex flex-col items-center justify-center flex-1 h-full py-1 text-[10px] font-mono transition-colors ${
-                isActive ? 'text-white font-semibold' : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              <Icon className={`w-4 h-4 mb-0.5 ${isActive ? 'text-white' : 'text-zinc-500'}`} />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
-      </nav>
-
-      {/* Mobile Quick Connect Modal */}
-      {showMobileQuickConnect && (
-        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-3 sm:p-4">
-          <form
-            onSubmit={(e) => {
-              handleQuickConnect(e);
-              setShowMobileQuickConnect(false);
-            }}
-            className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 w-[calc(100vw-1.5rem)] max-w-sm space-y-3 shadow-2xl"
-          >
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-medium text-white">Quick Connect</h3>
-              <button
-                type="button"
-                onClick={() => setShowMobileQuickConnect(false)}
-                className="text-zinc-500 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <input
-              type="text"
-              value={quickConnectInput}
-              onChange={(e) => setQuickConnectInput(e.target.value)}
-              placeholder="ssh -p 22 root@host"
-              className="w-full bg-black border border-zinc-700 rounded px-3 py-1.5 text-white outline-none font-mono text-xs"
-              autoFocus
-            />
-            <div className="flex justify-end gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => setShowMobileQuickConnect(false)}
-                className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={!quickConnectInput.trim()}
-                className="px-4 py-1.5 bg-white text-black text-xs font-semibold rounded disabled:opacity-40"
-              >
-                Connect
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* Manual Add Host Modal */}
       {showAddHostModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 select-none">
-          <form
-            onSubmit={handleAddHost}
-            className="bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl w-[calc(100vw-1rem)] sm:w-full max-w-md overflow-hidden flex flex-col max-h-[90dvh]"
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 select-none"
+          onClick={() => setShowAddHostModal(false)}
+        >
+          <div
+            className="bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800 bg-zinc-950">
               <div className="flex items-center gap-2">
                 <Server className="w-4 h-4 text-zinc-300" />
-                <span className="text-xs font-semibold text-white">Add SSH Host</span>
+                <span className="text-xs font-semibold text-white">Add New SSH Host</span>
               </div>
               <button
                 type="button"
@@ -888,79 +915,86 @@ export default function App() {
               </button>
             </div>
 
-            <div className="p-4 space-y-3.5 text-xs overflow-y-auto">
+            <form onSubmit={handleAddHost} className="p-4 space-y-3 font-mono text-xs">
               <div>
-                <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Label</label>
+                <label className="block text-zinc-400 mb-1">Host Label (Opsional)</label>
                 <input
                   type="text"
                   value={formLabel}
                   onChange={(e) => setFormLabel(e.target.value)}
-                  placeholder="e.g. Production Ubuntu Server"
-                  className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-3 py-1.5 text-white placeholder-zinc-500 outline-none transition-colors"
-                  autoFocus
+                  placeholder="My Ubuntu VPS"
+                  className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
                 />
               </div>
 
               <div className="grid grid-cols-3 gap-2">
                 <div className="col-span-2">
-                  <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Hostname / IP</label>
+                  <label className="block text-zinc-400 mb-1">Hostname / IP *</label>
                   <input
                     type="text"
+                    required
                     value={formHostname}
                     onChange={(e) => setFormHostname(e.target.value)}
                     placeholder="192.168.1.1"
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-3 py-1.5 text-white placeholder-zinc-500 outline-none font-mono transition-colors"
-                    required
+                    className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
                   />
                 </div>
                 <div>
-                  <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Port</label>
+                  <label className="block text-zinc-400 mb-1">Port *</label>
                   <input
                     type="number"
-                    value={formPort}
-                    onChange={(e) => setFormPort(parseInt(e.target.value, 10) || 22)}
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-3 py-1.5 text-white outline-none font-mono transition-colors"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Username</label>
-                  <input
-                    type="text"
-                    value={formUsername}
-                    onChange={(e) => setFormUsername(e.target.value)}
-                    placeholder="root"
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-3 py-1.5 text-white placeholder-zinc-500 outline-none font-mono transition-colors"
                     required
+                    value={formPort}
+                    onChange={(e) => setFormPort(Number(e.target.value))}
+                    className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
                   />
-                </div>
-                <div>
-                  <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Group</label>
-                  <select
-                    value={formGroup}
-                    onChange={(e) => setFormGroup(e.target.value as any)}
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-2.5 py-1.5 text-white outline-none font-mono transition-colors"
-                  >
-                    <option value="Production">Production</option>
-                    <option value="Staging">Staging</option>
-                    <option value="Database">Database</option>
-                    <option value="Custom">Custom</option>
-                  </select>
                 </div>
               </div>
 
               <div>
-                <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Auth Method</label>
-                <div className="flex gap-2">
+                <label className="block text-zinc-400 mb-1">Username *</label>
+                <input
+                  type="text"
+                  required
+                  value={formUsername}
+                  onChange={(e) => setFormUsername(e.target.value)}
+                  className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-zinc-400 mb-1">OS Distro (Auto-detect / Manual)</label>
+                <select
+                  value={formDistro}
+                  onChange={(e) => setFormDistro(e.target.value as DistroType | 'auto')}
+                  className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
+                >
+                  <option value="auto">Auto-detect (Otomatis dari SSH probe)</option>
+                  <option value="ubuntu">Ubuntu</option>
+                  <option value="debian">Debian</option>
+                  <option value="centos">CentOS</option>
+                  <option value="redhat">Red Hat / Alma / Rocky</option>
+                  <option value="alpine">Alpine</option>
+                  <option value="arch">Arch Linux</option>
+                  <option value="fedora">Fedora</option>
+                  <option value="kali">Kali Linux</option>
+                  <option value="suse">openSUSE</option>
+                  <option value="darwin">macOS</option>
+                  <option value="windows">Windows</option>
+                  <option value="linux">Generic Linux</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-zinc-400 mb-1">Metode Autentikasi</label>
+                <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
                     onClick={() => setFormAuthMethod('password')}
-                    className={`flex-1 py-1.5 rounded text-xs border transition-colors ${
+                    className={`py-1.5 rounded border text-center transition-colors ${
                       formAuthMethod === 'password'
-                        ? 'bg-white text-black border-white font-medium'
-                        : 'border-zinc-800 text-zinc-400 hover:text-white bg-zinc-950'
+                        ? 'bg-zinc-800 border-zinc-500 text-white font-medium'
+                        : 'bg-black border-zinc-800 text-zinc-400 hover:text-white'
                     }`}
                   >
                     Password
@@ -968,10 +1002,10 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setFormAuthMethod('key')}
-                    className={`flex-1 py-1.5 rounded text-xs border transition-colors ${
+                    className={`py-1.5 rounded border text-center transition-colors ${
                       formAuthMethod === 'key'
-                        ? 'bg-white text-black border-white font-medium'
-                        : 'border-zinc-800 text-zinc-400 hover:text-white bg-zinc-950'
+                        ? 'bg-zinc-800 border-zinc-500 text-white font-medium'
+                        : 'bg-black border-zinc-800 text-zinc-400 hover:text-white'
                     }`}
                   >
                     SSH Key
@@ -981,22 +1015,22 @@ export default function App() {
 
               {formAuthMethod === 'password' ? (
                 <div>
-                  <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Password</label>
+                  <label className="block text-zinc-400 mb-1">Password</label>
                   <input
                     type="password"
                     value={formPassword}
                     onChange={(e) => setFormPassword(e.target.value)}
-                    placeholder="••••••••"
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-3 py-1.5 text-white outline-none font-mono transition-colors"
+                    placeholder="Password SSH"
+                    className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
                   />
                 </div>
               ) : (
                 <div>
-                  <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Select Key</label>
+                  <label className="block text-zinc-400 mb-1">Pilih SSH Key</label>
                   <select
                     value={formKeyId}
                     onChange={(e) => setFormKeyId(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-2.5 py-1.5 text-white outline-none font-mono transition-colors"
+                    className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
                   >
                     {keys.map((k) => (
                       <option key={k.id} value={k.id}>
@@ -1006,38 +1040,39 @@ export default function App() {
                   </select>
                 </div>
               )}
-            </div>
 
-            <div className="flex justify-end gap-2 px-4 py-3 border-t border-zinc-800 bg-zinc-950">
-              <button
-                type="button"
-                onClick={() => setShowAddHostModal(false)}
-                className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={!formHostname.trim() || !formUsername.trim()}
-                className="px-4 py-1.5 bg-white text-black hover:bg-zinc-200 text-xs font-semibold rounded transition-colors disabled:opacity-40"
-              >
-                Save Host
-              </button>
-            </div>
-          </form>
+              <div className="flex justify-end gap-2 pt-2 border-t border-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => setShowAddHostModal(false)}
+                  className="px-3 py-1.5 text-zinc-400 hover:text-white"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-1.5 bg-white hover:bg-zinc-200 text-black font-semibold rounded"
+                >
+                  Simpan Host
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 
-      {/* Edit Host Modal */}
       {editingHost && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 select-none">
-          <form
-            onSubmit={handleSaveEditHost}
-            className="bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl w-[calc(100vw-1rem)] sm:w-full max-w-md overflow-hidden flex flex-col max-h-[90dvh]"
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 select-none"
+          onClick={() => setEditingHost(null)}
+        >
+          <div
+            className="bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800 bg-zinc-950">
               <div className="flex items-center gap-2">
-                <DistroIcon host={editingHost} className="w-4 h-4 text-zinc-300" />
+                <Pencil className="w-4 h-4 text-zinc-300" />
                 <span className="text-xs font-semibold text-white">Edit SSH Host</span>
               </div>
               <button
@@ -1049,79 +1084,84 @@ export default function App() {
               </button>
             </div>
 
-            <div className="p-4 space-y-3.5 text-xs overflow-y-auto">
+            <form onSubmit={handleSaveEditHost} className="p-4 space-y-3 font-mono text-xs">
               <div>
-                <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Label</label>
+                <label className="block text-zinc-400 mb-1">Host Label</label>
                 <input
                   type="text"
                   value={formLabel}
                   onChange={(e) => setFormLabel(e.target.value)}
-                  placeholder="e.g. Production Server"
-                  className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-3 py-1.5 text-white outline-none transition-colors"
-                  autoFocus
+                  className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
                 />
               </div>
 
               <div className="grid grid-cols-3 gap-2">
                 <div className="col-span-2">
-                  <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Hostname / IP</label>
+                  <label className="block text-zinc-400 mb-1">Hostname / IP *</label>
                   <input
                     type="text"
+                    required
                     value={formHostname}
                     onChange={(e) => setFormHostname(e.target.value)}
-                    placeholder="192.168.1.1"
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-3 py-1.5 text-white outline-none font-mono transition-colors"
-                    required
+                    className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
                   />
                 </div>
                 <div>
-                  <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Port</label>
+                  <label className="block text-zinc-400 mb-1">Port *</label>
                   <input
                     type="number"
-                    value={formPort}
-                    onChange={(e) => setFormPort(parseInt(e.target.value, 10) || 22)}
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-3 py-1.5 text-white outline-none font-mono transition-colors"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Username</label>
-                  <input
-                    type="text"
-                    value={formUsername}
-                    onChange={(e) => setFormUsername(e.target.value)}
-                    placeholder="root"
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-3 py-1.5 text-white outline-none font-mono transition-colors"
                     required
+                    value={formPort}
+                    onChange={(e) => setFormPort(Number(e.target.value))}
+                    className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
                   />
-                </div>
-                <div>
-                  <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Group</label>
-                  <select
-                    value={formGroup}
-                    onChange={(e) => setFormGroup(e.target.value as any)}
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-2.5 py-1.5 text-white outline-none font-mono transition-colors"
-                  >
-                    <option value="Production">Production</option>
-                    <option value="Staging">Staging</option>
-                    <option value="Database">Database</option>
-                    <option value="Custom">Custom</option>
-                  </select>
                 </div>
               </div>
 
               <div>
-                <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Auth Method</label>
-                <div className="flex gap-2">
+                <label className="block text-zinc-400 mb-1">Username *</label>
+                <input
+                  type="text"
+                  required
+                  value={formUsername}
+                  onChange={(e) => setFormUsername(e.target.value)}
+                  className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-zinc-400 mb-1">OS Distro (Auto-detect / Manual)</label>
+                <select
+                  value={formDistro}
+                  onChange={(e) => setFormDistro(e.target.value as DistroType | 'auto')}
+                  className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
+                >
+                  <option value="auto">Auto-detect (Otomatis dari SSH probe)</option>
+                  <option value="ubuntu">Ubuntu</option>
+                  <option value="debian">Debian</option>
+                  <option value="centos">CentOS</option>
+                  <option value="redhat">Red Hat / Alma / Rocky</option>
+                  <option value="alpine">Alpine</option>
+                  <option value="arch">Arch Linux</option>
+                  <option value="fedora">Fedora</option>
+                  <option value="kali">Kali Linux</option>
+                  <option value="suse">openSUSE</option>
+                  <option value="darwin">macOS</option>
+                  <option value="windows">Windows</option>
+                  <option value="linux">Generic Linux</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-zinc-400 mb-1">Metode Autentikasi</label>
+                <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
                     onClick={() => setFormAuthMethod('password')}
-                    className={`flex-1 py-1.5 rounded text-xs border transition-colors ${
+                    className={`py-1.5 rounded border text-center transition-colors ${
                       formAuthMethod === 'password'
-                        ? 'bg-white text-black border-white font-medium'
-                        : 'border-zinc-800 text-zinc-400 hover:text-white bg-zinc-950'
+                        ? 'bg-zinc-800 border-zinc-500 text-white font-medium'
+                        : 'bg-black border-zinc-800 text-zinc-400 hover:text-white'
                     }`}
                   >
                     Password
@@ -1129,10 +1169,10 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setFormAuthMethod('key')}
-                    className={`flex-1 py-1.5 rounded text-xs border transition-colors ${
+                    className={`py-1.5 rounded border text-center transition-colors ${
                       formAuthMethod === 'key'
-                        ? 'bg-white text-black border-white font-medium'
-                        : 'border-zinc-800 text-zinc-400 hover:text-white bg-zinc-950'
+                        ? 'bg-zinc-800 border-zinc-500 text-white font-medium'
+                        : 'bg-black border-zinc-800 text-zinc-400 hover:text-white'
                     }`}
                   >
                     SSH Key
@@ -1142,22 +1182,22 @@ export default function App() {
 
               {formAuthMethod === 'password' ? (
                 <div>
-                  <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Password</label>
+                  <label className="block text-zinc-400 mb-1">Password</label>
                   <input
                     type="password"
                     value={formPassword}
                     onChange={(e) => setFormPassword(e.target.value)}
-                    placeholder="••••••••"
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-3 py-1.5 text-white outline-none font-mono transition-colors"
+                    placeholder="Ganti password"
+                    className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
                   />
                 </div>
               ) : (
                 <div>
-                  <label className="text-zinc-400 block mb-1 font-mono text-[11px]">Select Key</label>
+                  <label className="block text-zinc-400 mb-1">Pilih SSH Key</label>
                   <select
                     value={formKeyId}
                     onChange={(e) => setFormKeyId(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-zinc-500 rounded px-2.5 py-1.5 text-white outline-none font-mono transition-colors"
+                    className="w-full bg-black border border-zinc-700 rounded px-2.5 py-1.5 text-white outline-none"
                   >
                     {keys.map((k) => (
                       <option key={k.id} value={k.id}>
@@ -1167,25 +1207,63 @@ export default function App() {
                   </select>
                 </div>
               )}
-            </div>
 
-            <div className="flex justify-end gap-2 px-4 py-3 border-t border-zinc-800 bg-zinc-950">
+              <div className="flex justify-end gap-2 pt-2 border-t border-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => setEditingHost(null)}
+                  className="px-3 py-1.5 text-zinc-400 hover:text-white"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-1.5 bg-white hover:bg-zinc-200 text-black font-semibold rounded"
+                >
+                  Simpan Perubahan
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showMobileQuickConnect && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 select-none"
+          onClick={() => setShowMobileQuickConnect(false)}
+        >
+          <div
+            className="bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl w-full max-w-sm overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-800 bg-zinc-950">
+              <span className="text-xs font-semibold text-white">Quick Connect SSH</span>
               <button
                 type="button"
-                onClick={() => setEditingHost(null)}
-                className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white transition-colors"
+                onClick={() => setShowMobileQuickConnect(false)}
+                className="text-zinc-400 hover:text-white"
               >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={!formHostname.trim() || !formUsername.trim()}
-                className="px-4 py-1.5 bg-white text-black hover:bg-zinc-200 text-xs font-semibold rounded transition-colors disabled:opacity-40"
-              >
-                Update Host
+                <X className="w-3.5 h-3.5" />
               </button>
             </div>
-          </form>
+            <form onSubmit={handleQuickConnect} className="p-3.5 space-y-3 font-mono text-xs">
+              <input
+                type="text"
+                value={quickConnectInput}
+                onChange={(e) => setQuickConnectInput(e.target.value)}
+                placeholder="ssh -p 22 root@host"
+                className="w-full bg-black border border-zinc-700 rounded p-2 text-white outline-none"
+                autoFocus
+              />
+              <button
+                type="submit"
+                className="w-full py-2 bg-white text-black font-semibold rounded text-xs"
+              >
+                Connect Now
+              </button>
+            </form>
+          </div>
         </div>
       )}
     </div>

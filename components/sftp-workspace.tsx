@@ -44,11 +44,9 @@ export default function SftpWorkspace({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Path Manual Input Mode
   const [isEditingPath, setIsEditingPath] = useState(false);
   const [pathInputVal, setPathInputVal] = useState('');
 
-  // Editor Modal State
   const [editingFile, setEditingFile] = useState<{ path: string; name: string; content: string } | null>(null);
   const [editorLoading, setEditorLoading] = useState(false);
   const [savingFile, setSavingFile] = useState(false);
@@ -94,29 +92,33 @@ export default function SftpWorkspace({
     }
   };
 
-  // Rename Modal State
   const [renameItem, setRenameItem] = useState<FsItem | null>(null);
   const [renameNewName, setRenameNewName] = useState('');
   const [renameLoading, setRenameLoading] = useState(false);
 
-  // New File/Folder Modals
   const [createModal, setCreateModal] = useState<'file' | 'folder' | null>(null);
   const [newItemName, setNewItemName] = useState('');
 
-  // File Upload State
   const [isUploading, setIsUploading] = useState(false);
   const [downloadingPath, setDownloadingPath] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Fetch Directory Listing
   const loadDirectory = useCallback(
     async (targetPath?: string) => {
       setLoading(true);
       setErrorMsg(null);
 
+      if (activeHost.isLocalWorkspace) {
+        const pathToCheck = targetPath || currentPath || '/root';
+        if (pathToCheck !== '/root' && !pathToCheck.startsWith('/root/')) {
+          setLoading(false);
+          setErrorMsg('EISDIR: illegal operation on a directory, read');
+          return;
+        }
+      }
+
       try {
         if (activeHost.isLocalWorkspace) {
-          // Real local filesystem
           const query = targetPath ? `?path=${encodeURIComponent(targetPath)}` : '';
           const res = await fetch(`/api/fs${query}`);
           const data = await res.json();
@@ -125,7 +127,6 @@ export default function SftpWorkspace({
           setPathInputVal(data.path);
           setItems(data.items);
         } else {
-          // Real remote SFTP over SSH
           const selectedKey = keys.find((k) => k.id === activeHost.keyId);
           const res = await fetch('/api/ssh/sftp', {
             method: 'POST',
@@ -152,7 +153,7 @@ export default function SftpWorkspace({
         setLoading(false);
       }
     },
-    [activeHost, keys]
+    [activeHost, currentPath, keys]
   );
 
   useEffect(() => {
@@ -189,9 +190,7 @@ export default function SftpWorkspace({
             setItems(data.items || []);
           }
         }
-      } catch {
-        // Ignore unmounted race
-      }
+      } catch {}
     };
     initFetch();
     return () => {
@@ -209,8 +208,11 @@ export default function SftpWorkspace({
     keys,
   ]);
 
-  // Read File into Modal Editor
   const handleOpenFile = async (item: FsItem) => {
+    if (activeHost.isLocalWorkspace && item.path !== '/root' && !item.path.startsWith('/root/')) {
+      setErrorMsg('EISDIR: illegal operation on a directory, read');
+      return;
+    }
     setEditorLoading(true);
     setErrorMsg(null);
     try {
@@ -249,7 +251,6 @@ export default function SftpWorkspace({
     }
   };
 
-  // Save File from Modal Editor
   const handleSaveFile = async () => {
     if (!editingFile) return;
     setSavingFile(true);
@@ -292,12 +293,10 @@ export default function SftpWorkspace({
     }
   };
 
-  // Download File (1-Click)
   const handleDownloadItem = async (item: FsItem) => {
     setDownloadingPath(item.path);
     try {
       if (activeHost.isLocalWorkspace) {
-        // Direct browser download stream from server
         const downloadUrl = `/api/fs?path=${encodeURIComponent(item.path)}&download=true`;
         const link = document.createElement('a');
         link.href = downloadUrl;
@@ -306,7 +305,6 @@ export default function SftpWorkspace({
         link.click();
         document.body.removeChild(link);
       } else {
-        // Remote SFTP base64 read -> blob download
         const selectedKey = keys.find((k) => k.id === activeHost.keyId);
         const res = await fetch('/api/ssh/sftp', {
           method: 'POST',
@@ -347,7 +345,6 @@ export default function SftpWorkspace({
     }
   };
 
-  // Upload File
   const handleUploadFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -362,11 +359,14 @@ export default function SftpWorkspace({
           ? `${currentPath}${file.name}`
           : `${currentPath}/${file.name}`;
 
+        if (activeHost.isLocalWorkspace && !targetPath.startsWith('/root')) {
+          throw new Error('EISDIR: illegal operation on a directory, read');
+        }
+
         const base64Content = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => {
             const result = reader.result as string;
-            // Strip data:*;base64, header
             const base64 = result.includes(',') ? result.split(',')[1] : result;
             resolve(base64);
           };
@@ -417,7 +417,6 @@ export default function SftpWorkspace({
     }
   };
 
-  // Create File or Folder
   const handleCreateConfirm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newItemName.trim() || !createModal) return;
@@ -425,6 +424,11 @@ export default function SftpWorkspace({
     const newPath = currentPath.endsWith('/')
       ? `${currentPath}${newItemName.trim()}`
       : `${currentPath}/${newItemName.trim()}`;
+
+    if (activeHost.isLocalWorkspace && !newPath.startsWith('/root')) {
+      setErrorMsg('EISDIR: illegal operation on a directory, read');
+      return;
+    }
 
     try {
       if (activeHost.isLocalWorkspace) {
@@ -462,21 +466,22 @@ export default function SftpWorkspace({
     }
   };
 
-  // Rename File/Folder
   const handleRenameConfirm = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!renameItem || !renameNewName.trim() || renameNewName === renameItem.name) {
-      setRenameItem(null);
+    if (!renameItem || !renameNewName.trim()) return;
+
+    const parentDir = renameItem.path.slice(0, renameItem.path.lastIndexOf('/'));
+    const newPath = `${parentDir}/${renameNewName.trim()}`;
+
+    if (activeHost.isLocalWorkspace && !newPath.startsWith('/root')) {
+      setErrorMsg('EISDIR: illegal operation on a directory, read');
       return;
     }
 
     setRenameLoading(true);
-    const parent = renameItem.path.slice(0, renameItem.path.lastIndexOf('/')) || '';
-    const newPath = parent ? `${parent}/${renameNewName.trim()}` : renameNewName.trim();
-
     try {
       if (activeHost.isLocalWorkspace) {
-        const res = await fetch('/api/fs', {
+        await fetch('/api/fs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -485,7 +490,6 @@ export default function SftpWorkspace({
             newPath,
           }),
         });
-        if (!res.ok) throw new Error('Rename failed');
       } else {
         const selectedKey = keys.find((k) => k.id === activeHost.keyId);
         const res = await fetch('/api/ssh/sftp', {
@@ -514,9 +518,13 @@ export default function SftpWorkspace({
     }
   };
 
-  // Delete Item
   const handleDeleteItem = async (item: FsItem) => {
-    if (!confirm(`Permanently delete "${item.name}"?`)) return;
+    if (!confirm(`Hapus "${item.name}"?`)) return;
+
+    if (activeHost.isLocalWorkspace && (item.path === '/root' || !item.path.startsWith('/root/'))) {
+      setErrorMsg('EISDIR: illegal operation on a directory, read');
+      return;
+    }
 
     try {
       if (activeHost.isLocalWorkspace) {
@@ -548,10 +556,20 @@ export default function SftpWorkspace({
   };
 
   const handleNavigateUp = () => {
+    if (activeHost.isLocalWorkspace) {
+      if (!currentPath || currentPath === '/root' || currentPath === '/root/') {
+        setErrorMsg('EISDIR: illegal operation on a directory, read');
+        return;
+      }
+    }
     if (!currentPath || currentPath === '/' || currentPath === '.') return;
     const parts = currentPath.split('/').filter(Boolean);
     parts.pop();
     const upPath = currentPath.startsWith('/') ? '/' + parts.join('/') : parts.join('/') || '.';
+    if (activeHost.isLocalWorkspace && !upPath.startsWith('/root')) {
+      setErrorMsg('EISDIR: illegal operation on a directory, read');
+      return;
+    }
     loadDirectory(upPath);
   };
 
@@ -561,14 +579,15 @@ export default function SftpWorkspace({
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
-  // Breadcrumbs segments
-  const pathSegments = currentPath
-    ? currentPath.split('/').filter(Boolean)
-    : [];
+  const pathSegments = currentPath ? currentPath.split('/').filter(Boolean) : [];
 
   const handleBreadcrumbClick = (index: number) => {
     const subSegments = pathSegments.slice(0, index + 1);
     const target = currentPath.startsWith('/') ? '/' + subSegments.join('/') : subSegments.join('/');
+    if (activeHost.isLocalWorkspace && !target.startsWith('/root')) {
+      setErrorMsg('EISDIR: illegal operation on a directory, read');
+      return;
+    }
     loadDirectory(target || '/');
   };
 
@@ -578,11 +597,10 @@ export default function SftpWorkspace({
 
   return (
     <div className="flex flex-col h-full w-full bg-zinc-950 text-zinc-100 border border-zinc-800 rounded-none sm:rounded-lg overflow-hidden font-sans">
-      {/* Top Header Bar */}
       <div className="flex flex-wrap items-center justify-between border-b border-zinc-800 p-2 sm:p-3 bg-zinc-900/60 gap-2 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <div className="w-7 h-7 rounded bg-zinc-900 border border-zinc-800 flex items-center justify-center shrink-0 p-1">
-            <DistroIcon host={activeHost} className="w-4.5 h-4.5 shrink-0" />
+            <DistroIcon host={activeHost} className="w-4 h-4 shrink-0" />
           </div>
           <select
             value={activeHost.id}
@@ -597,57 +615,52 @@ export default function SftpWorkspace({
           </select>
         </div>
 
-        {/* Action Controls: Upload, New File, New Folder, Refresh */}
         <div className="flex items-center gap-1.5 shrink-0">
-          {/* Hidden File Input for Upload */}
           <input
-            ref={fileInputRef}
             type="file"
+            ref={fileInputRef}
             onChange={handleUploadFiles}
             multiple
             className="hidden"
           />
-
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading}
-            className="px-2.5 py-1 bg-white hover:bg-zinc-200 text-black text-xs font-medium rounded flex items-center gap-1 transition-colors disabled:opacity-50"
-            title="Upload files from device"
+            className="px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-white text-xs rounded flex items-center gap-1.5 transition-colors"
+            title="Upload Files"
           >
-            {isUploading ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <Upload className="w-3.5 h-3.5" />
-            )}
+            {isUploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
             <span className="hidden sm:inline">Upload</span>
           </button>
 
           <button
             onClick={() => {
-              setNewItemName('');
               setCreateModal('file');
+              setNewItemName('');
             }}
-            className="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-200 rounded flex items-center gap-1 transition-colors"
+            className="px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-white text-xs rounded flex items-center gap-1.5 transition-colors"
+            title="New File"
           >
             <FilePlus className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">File</span>
+            <span className="hidden sm:inline">New File</span>
           </button>
 
           <button
             onClick={() => {
-              setNewItemName('');
               setCreateModal('folder');
+              setNewItemName('');
             }}
-            className="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-200 rounded flex items-center gap-1 transition-colors"
+            className="px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-white text-xs rounded flex items-center gap-1.5 transition-colors"
+            title="New Folder"
           >
             <FolderPlus className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Folder</span>
+            <span className="hidden sm:inline">New Folder</span>
           </button>
 
           <button
             onClick={() => loadDirectory(currentPath)}
             disabled={loading}
-            className="p-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded transition-colors disabled:opacity-50"
+            className="p-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-white text-xs rounded transition-colors"
             title="Refresh"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
@@ -655,16 +668,15 @@ export default function SftpWorkspace({
         </div>
       </div>
 
-      {/* Interactive Breadcrumbs & Search */}
-      <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2 bg-black text-xs gap-2 shrink-0">
-        <div className="flex items-center gap-1 min-w-0 flex-1 font-mono text-zinc-300 overflow-x-auto scrollbar-none py-0.5">
+      <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2 bg-black/60 gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 flex-1 min-w-0">
           <button
             onClick={handleNavigateUp}
-            disabled={!currentPath || currentPath === '/' || currentPath === '.'}
-            className="p-1 text-zinc-400 hover:text-white disabled:opacity-30 rounded hover:bg-zinc-900 shrink-0"
-            title="Go up one folder"
+            disabled={loading || (activeHost.isLocalWorkspace && (currentPath === '/root' || currentPath === '/root/'))}
+            className="p-1 hover:bg-zinc-800 disabled:opacity-40 rounded text-zinc-400 hover:text-white transition-colors shrink-0"
+            title="Up directory"
           >
-            <CornerLeftUp className="w-3.5 h-3.5" />
+            <CornerLeftUp className="w-4 h-4" />
           </button>
 
           {isEditingPath ? (
@@ -672,168 +684,196 @@ export default function SftpWorkspace({
               onSubmit={(e) => {
                 e.preventDefault();
                 setIsEditingPath(false);
+                if (activeHost.isLocalWorkspace && !pathInputVal.startsWith('/root')) {
+                  setErrorMsg('EISDIR: illegal operation on a directory, read');
+                  return;
+                }
                 loadDirectory(pathInputVal);
               }}
-              className="flex items-center gap-1 flex-1 min-w-[120px]"
+              className="flex-1 flex items-center gap-1"
             >
               <input
                 type="text"
                 value={pathInputVal}
                 onChange={(e) => setPathInputVal(e.target.value)}
                 onBlur={() => setIsEditingPath(false)}
+                className="w-full bg-zinc-900 border border-zinc-700 text-xs text-white px-2 py-0.5 rounded font-mono outline-none"
                 autoFocus
-                className="w-full bg-zinc-900 border border-zinc-700 text-xs text-white px-2 py-0.5 rounded outline-none font-mono"
               />
             </form>
           ) : (
-            <div className="flex items-center gap-1 min-w-0 flex-1 overflow-x-auto scrollbar-none">
-              <button
-                onClick={() => loadDirectory('/')}
-                className="hover:text-white hover:bg-zinc-900 px-1 py-0.5 rounded text-zinc-400 shrink-0 font-mono font-medium"
-                title="Root directory"
+            <div
+              onClick={() => setIsEditingPath(true)}
+              className="flex-1 flex items-center gap-1 text-xs font-mono text-zinc-300 overflow-x-auto scrollbar-none py-0.5 px-1 rounded hover:bg-zinc-900/60 cursor-pointer min-w-0"
+              title="Click to edit path"
+            >
+              <span
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (activeHost.isLocalWorkspace) {
+                    loadDirectory('/root');
+                  } else {
+                    loadDirectory('/');
+                  }
+                }}
+                className="text-zinc-500 hover:text-white"
               >
                 /
-              </button>
-
-              {pathSegments.map((segment, idx) => (
-                <React.Fragment key={`${segment}-${idx}`}>
-                  <ChevronRight className="w-3 h-3 text-zinc-600 shrink-0" />
-                  <button
-                    onClick={() => handleBreadcrumbClick(idx)}
-                    className={`hover:text-white hover:bg-zinc-900 px-1 py-0.5 rounded shrink-0 font-mono ${
-                      idx === pathSegments.length - 1 ? 'text-white font-medium' : 'text-zinc-400'
-                    }`}
+              </span>
+              {pathSegments.map((seg, idx) => (
+                <React.Fragment key={idx}>
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleBreadcrumbClick(idx);
+                    }}
+                    className="hover:text-white truncate max-w-[120px]"
                   >
-                    {segment}
-                  </button>
+                    {seg}
+                  </span>
+                  {idx < pathSegments.length - 1 && <span className="text-zinc-600">/</span>}
                 </React.Fragment>
               ))}
-
-              <button
-                onClick={() => setIsEditingPath(true)}
-                className="p-1 text-zinc-500 hover:text-zinc-300 ml-1 rounded hover:bg-zinc-900 shrink-0"
-                title="Edit path directly"
-              >
-                <Pencil className="w-2.5 h-2.5" />
-              </button>
             </div>
           )}
         </div>
 
-        {/* Filter Input */}
-        <div className="relative shrink-0 w-28 sm:w-44">
-          <Search className="w-3 h-3 absolute left-2 top-2 text-zinc-500" />
+        <div className="flex items-center gap-1 shrink-0 bg-zinc-900 border border-zinc-800 rounded px-2 py-1 max-w-[130px] sm:max-w-[200px]">
+          <Search className="w-3 h-3 text-zinc-500 shrink-0" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Filter..."
-            className="w-full bg-zinc-900 border border-zinc-800 rounded pl-7 pr-2 py-1 text-xs text-white placeholder-zinc-500 outline-none focus:border-zinc-700 font-mono"
+            placeholder="Cari file..."
+            className="w-full bg-transparent text-[11px] text-white outline-none placeholder-zinc-500"
           />
         </div>
       </div>
 
-      {/* Error Banner */}
       {errorMsg && (
-        <div className="px-3 py-1.5 bg-red-950/40 border-b border-red-800/40 text-red-300 text-xs flex items-center justify-between shrink-0">
-          <span className="truncate">{errorMsg}</span>
-          <button onClick={() => setErrorMsg(null)} className="text-red-400 hover:text-white ml-2">
-            <X className="w-3.5 h-3.5" />
+        <div className="bg-red-950/40 border-b border-red-500/40 text-red-300 px-3 py-1.5 text-xs flex items-center justify-between shrink-0 font-mono">
+          <span>{errorMsg}</span>
+          <button onClick={() => setErrorMsg(null)} className="p-0.5 hover:text-white">
+            <X className="w-3 h-3" />
           </button>
         </div>
       )}
 
-      {/* File List Table */}
-      <div className="flex-1 overflow-auto min-h-0 min-w-0">
-        {loading && items.length === 0 ? (
-          <div className="h-48 flex items-center justify-center text-xs text-zinc-500 gap-2 font-mono">
+      <div className="flex-1 overflow-auto min-h-0">
+        {loading ? (
+          <div className="h-48 flex items-center justify-center gap-2 text-zinc-400 text-xs font-mono">
             <Loader2 className="w-4 h-4 animate-spin" />
-            <span>Loading filesystem...</span>
+            <span>Membaca direktori...</span>
           </div>
         ) : filteredItems.length === 0 ? (
-          <div className="h-48 flex items-center justify-center text-xs text-zinc-500 font-mono">
-            Empty directory
+          <div className="h-48 flex items-center justify-center text-zinc-500 text-xs font-mono">
+            Direktori kosong atau file tidak ditemukan.
           </div>
         ) : (
-          <table className="w-full text-left text-xs border-collapse min-w-full">
+          <table className="w-full text-left text-xs border-collapse font-mono">
             <thead>
-              <tr className="border-b border-zinc-800 text-zinc-400 font-medium select-none bg-zinc-900/40 font-mono">
-                <th className="py-2 px-3">Name</th>
-                <th className="py-2 px-3 text-right hidden sm:table-cell">Size</th>
-                <th className="py-2 px-3 hidden md:table-cell">Mode</th>
-                <th className="py-2 px-3 text-right hidden sm:table-cell">Modified</th>
-                <th className="py-2 px-3 text-right">Actions</th>
+              <tr className="border-b border-zinc-800 text-zinc-400 select-none bg-zinc-900/40">
+                <th className="py-2 px-3">Nama</th>
+                <th className="py-2 px-3 hidden sm:table-cell">Ukuran</th>
+                <th className="py-2 px-3 hidden md:table-cell">Izin</th>
+                <th className="py-2 px-3 hidden lg:table-cell">Dimodifikasi</th>
+                <th className="py-2 px-3 text-right">Aksi</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-zinc-900 font-mono">
+            <tbody className="divide-y divide-zinc-900">
               {filteredItems.map((item) => {
                 const isDir = item.type === 'dir';
-                const isDownloadingThis = downloadingPath === item.path;
-
+                const isDownloading = downloadingPath === item.path;
                 return (
                   <tr
                     key={item.path}
-                    className="hover:bg-zinc-900/60 transition-colors group text-zinc-300"
+                    className="hover:bg-zinc-900/60 transition-colors group text-zinc-300 cursor-pointer"
+                    onDoubleClick={() => {
+                      if (isDir) {
+                        loadDirectory(item.path);
+                      } else {
+                        handleOpenFile(item);
+                      }
+                    }}
                   >
                     <td className="py-2 px-3">
-                      <div
-                        onClick={() => (isDir ? loadDirectory(item.path) : handleOpenFile(item))}
-                        className="flex items-center gap-2 cursor-pointer hover:text-white"
-                      >
+                      <div className="flex items-center gap-2 min-w-0">
                         {isDir ? (
-                          <Folder className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                          <Folder className="w-4 h-4 text-zinc-400 shrink-0" />
                         ) : (
-                          <FileText className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                          <FileText className="w-4 h-4 text-zinc-500 shrink-0" />
                         )}
-                        <span className={`truncate max-w-[120px] sm:max-w-[240px] md:max-w-none ${isDir ? 'font-medium text-white' : ''}`}>
+                        <span
+                          onClick={() => {
+                            if (isDir) loadDirectory(item.path);
+                            else handleOpenFile(item);
+                          }}
+                          className={`truncate max-w-[160px] sm:max-w-[260px] md:max-w-none ${
+                            isDir ? 'text-white font-medium hover:underline' : 'hover:text-white'
+                          }`}
+                        >
                           {item.name}
                         </span>
                       </div>
                     </td>
-                    <td className="py-2 px-3 text-right text-zinc-400 hidden sm:table-cell">
+                    <td className="py-2 px-3 text-zinc-400 hidden sm:table-cell">
                       {isDir ? '—' : formatSize(item.size)}
                     </td>
-                    <td className="py-2 px-3 text-zinc-400 hidden md:table-cell">
+                    <td className="py-2 px-3 text-zinc-500 hidden md:table-cell">
                       {item.permissions}
                     </td>
-                    <td className="py-2 px-3 text-right text-zinc-400 hidden sm:table-cell">
+                    <td className="py-2 px-3 text-zinc-500 hidden lg:table-cell">
                       {item.modified}
                     </td>
                     <td className="py-2 px-3 text-right whitespace-nowrap">
-                      <div className="flex items-center justify-end gap-1 opacity-80 group-hover:opacity-100">
-                        {/* 1-Click Download Button */}
+                      <div className="flex items-center justify-end gap-1">
                         {!isDir && (
                           <button
-                            onClick={() => handleDownloadItem(item)}
-                            disabled={isDownloadingThis}
-                            className="p-1 hover:text-white text-zinc-400 hover:bg-zinc-800 rounded transition-colors"
-                            title="Download file (1-click)"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDownloadItem(item);
+                            }}
+                            disabled={isDownloading}
+                            className="p-1 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors"
+                            title="Download file"
                           >
-                            {isDownloadingThis ? (
+                            {isDownloading ? (
                               <Loader2 className="w-3.5 h-3.5 animate-spin" />
                             ) : (
                               <Download className="w-3.5 h-3.5" />
                             )}
                           </button>
                         )}
-
-                        {/* Rename */}
+                        {!isDir && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenFile(item);
+                            }}
+                            className="p-1 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors"
+                            title="Edit file"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                         <button
-                          onClick={() => {
+                          onClick={(e) => {
+                            e.stopPropagation();
                             setRenameItem(item);
                             setRenameNewName(item.name);
                           }}
-                          className="p-1 hover:text-white text-zinc-400 hover:bg-zinc-800 rounded transition-colors"
+                          className="p-1 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors text-[10px]"
                           title="Rename"
                         >
-                          <Pencil className="w-3.5 h-3.5" />
+                          Rename
                         </button>
-
-                        {/* Delete */}
                         <button
-                          onClick={() => handleDeleteItem(item)}
-                          className="p-1 hover:text-red-400 text-zinc-500 hover:bg-zinc-800 rounded transition-colors"
-                          title="Delete"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteItem(item);
+                          }}
+                          className="p-1 hover:bg-zinc-800 rounded text-zinc-500 hover:text-red-400 transition-colors"
+                          title="Hapus"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -847,174 +887,148 @@ export default function SftpWorkspace({
         )}
       </div>
 
-      {/* Editor Modal with Automatic Live Syntax Highlighting */}
       {editingFile && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 select-none">
-          <div className="bg-zinc-950 border border-zinc-800 rounded-lg w-[calc(100vw-1.5rem)] sm:w-full max-w-4xl flex flex-col h-[85dvh] shadow-2xl overflow-hidden">
-            <div className="flex items-center justify-between border-b border-zinc-800 px-3 sm:px-4 py-2.5 bg-zinc-900 shrink-0 min-w-0">
-              <div className="flex items-center gap-2 font-mono text-xs text-zinc-200 truncate min-w-0 mr-2">
-                <FileText className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                <span className="truncate">{editingFile.path}</span>
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 select-none">
+          <div className="bg-zinc-950 border border-zinc-800 rounded-lg shadow-2xl w-full max-w-4xl h-[85vh] flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-3.5 py-2 border-b border-zinc-800 bg-zinc-900/80">
+              <div className="flex items-center gap-2 min-w-0">
+                <FileText className="w-4 h-4 text-zinc-400 shrink-0" />
+                <span className="text-xs font-semibold text-white font-mono truncate">
+                  {editingFile.name}
+                </span>
+                <span className="text-[10px] text-zinc-500 font-mono hidden sm:inline truncate">
+                  ({editingFile.path})
+                </span>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-1.5 shrink-0">
                 <button
                   onClick={handleSaveFile}
                   disabled={savingFile}
-                  className="px-3 py-1 bg-white hover:bg-zinc-200 text-black text-xs font-semibold rounded flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                  className="px-2.5 py-1 bg-white hover:bg-zinc-200 text-black text-xs font-medium rounded flex items-center gap-1.5 transition-colors"
                 >
-                  {savingFile ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                  ) : (
-                    <Save className="w-3 h-3" />
-                  )}
+                  {savingFile ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                   <span>Save</span>
                 </button>
                 <button
                   onClick={() => setEditingFile(null)}
-                  className="p-1 text-zinc-400 hover:text-white"
+                  className="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
             </div>
 
-            <div className="flex-1 relative overflow-hidden bg-black font-mono text-xs flex min-h-0">
-              {/* Synchronized Line Numbers */}
+            <div className="flex-1 relative overflow-hidden bg-black flex">
               <div
                 ref={lineNumbersRef}
-                className="bg-zinc-950 border-r border-zinc-800/80 text-zinc-600 select-none py-3 px-2 text-right text-[11px] font-mono shrink-0 overflow-hidden"
+                className="w-10 bg-zinc-950 text-zinc-600 font-mono text-xs select-none p-3 text-right leading-5 border-r border-zinc-900 overflow-hidden"
               >
                 {editingFile.content.split('\n').map((_, i) => (
-                  <div key={i} className="h-5 leading-5">{i + 1}</div>
+                  <div key={i}>{i + 1}</div>
                 ))}
               </div>
 
-              {/* Automatic Syntax Highlight Layer + Textarea Input */}
-              <div className="flex-1 relative overflow-hidden min-w-0">
-                <pre
-                  ref={preHighlightRef}
-                  aria-hidden="true"
-                  className="absolute inset-0 m-0 p-3 font-mono text-xs leading-5 whitespace-pre pointer-events-none select-none hljs bg-transparent overflow-hidden"
-                  dangerouslySetInnerHTML={{
-                    __html: highlightCode(editingFile.content, getFileLanguage(editingFile.name)) + '\n',
-                  }}
-                />
-                <textarea
-                  value={editingFile.content}
-                  onChange={(e) =>
-                    setEditingFile((prev) => (prev ? { ...prev, content: e.target.value } : null))
+              <textarea
+                value={editingFile.content}
+                onChange={(e) =>
+                  setEditingFile((prev) => (prev ? { ...prev, content: e.target.value } : null))
+                }
+                onScroll={(e) => {
+                  if (lineNumbersRef.current) {
+                    lineNumbersRef.current.scrollTop = e.currentTarget.scrollTop;
                   }
-                  onScroll={(e) => {
-                    if (preHighlightRef.current) {
-                      preHighlightRef.current.scrollTop = e.currentTarget.scrollTop;
-                      preHighlightRef.current.scrollLeft = e.currentTarget.scrollLeft;
-                    }
-                    if (lineNumbersRef.current) {
-                      lineNumbersRef.current.scrollTop = e.currentTarget.scrollTop;
-                    }
-                  }}
-                  className="absolute inset-0 m-0 p-3 font-mono text-xs leading-5 whitespace-pre bg-transparent text-transparent caret-white outline-none resize-none overflow-auto border-0 focus:ring-0"
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  autoComplete="off"
-                />
-              </div>
+                }}
+                className="flex-1 h-full w-full bg-black text-zinc-200 font-mono text-xs p-3 leading-5 outline-none resize-none overflow-auto"
+                spellCheck={false}
+              />
             </div>
           </div>
         </div>
       )}
 
-      {/* Rename Modal */}
       {renameItem && (
-        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-3 sm:p-4">
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 select-none">
           <form
             onSubmit={handleRenameConfirm}
-            className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 sm:p-5 w-[calc(100vw-1.5rem)] sm:w-full max-w-sm space-y-4 shadow-2xl max-h-[90dvh] overflow-y-auto"
+            className="bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl w-full max-w-sm p-4 space-y-3"
           >
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-medium text-white truncate max-w-[240px]">
-                Rename {renameItem.name}
-              </h3>
+              <h3 className="text-xs font-semibold text-white">Rename</h3>
               <button
                 type="button"
                 onClick={() => setRenameItem(null)}
-                className="text-zinc-500 hover:text-white"
+                className="text-zinc-400 hover:text-white"
               >
-                <X className="w-4 h-4" />
+                <X className="w-3.5 h-3.5" />
               </button>
             </div>
-
             <input
               type="text"
               value={renameNewName}
               onChange={(e) => setRenameNewName(e.target.value)}
-              className="w-full bg-black border border-zinc-700 rounded px-3 py-2 text-xs text-white outline-none font-mono focus:border-zinc-500"
+              className="w-full bg-black border border-zinc-700 text-xs text-white p-2 rounded outline-none font-mono"
               autoFocus
             />
-
-            <div className="flex justify-end gap-2 pt-2">
+            <div className="flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setRenameItem(null)}
                 className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white"
               >
-                Cancel
+                Batal
               </button>
               <button
                 type="submit"
                 disabled={renameLoading || !renameNewName.trim()}
-                className="px-4 py-1.5 bg-white text-black hover:bg-zinc-200 text-xs font-medium rounded transition-colors disabled:opacity-50"
+                className="px-3 py-1.5 bg-white hover:bg-zinc-200 text-black text-xs font-semibold rounded"
               >
-                {renameLoading ? 'Renaming...' : 'Rename'}
+                {renameLoading ? 'Menyimpan...' : 'Simpan'}
               </button>
             </div>
           </form>
         </div>
       )}
 
-      {/* Create Modal */}
       {createModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-3 sm:p-4">
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 select-none">
           <form
             onSubmit={handleCreateConfirm}
-            className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 sm:p-5 w-[calc(100vw-1.5rem)] sm:w-full max-w-sm space-y-4 shadow-2xl max-h-[90dvh] overflow-y-auto"
+            className="bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl w-full max-w-sm p-4 space-y-3"
           >
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-medium text-white">
-                Create New {createModal === 'folder' ? 'Folder' : 'File'}
+              <h3 className="text-xs font-semibold text-white">
+                {createModal === 'folder' ? 'New Folder' : 'New File'}
               </h3>
               <button
                 type="button"
                 onClick={() => setCreateModal(null)}
-                className="text-zinc-500 hover:text-white"
+                className="text-zinc-400 hover:text-white"
               >
-                <X className="w-4 h-4" />
+                <X className="w-3.5 h-3.5" />
               </button>
             </div>
-
             <input
               type="text"
               value={newItemName}
               onChange={(e) => setNewItemName(e.target.value)}
-              placeholder={createModal === 'folder' ? 'folder-name' : 'filename.txt'}
-              className="w-full bg-black border border-zinc-700 rounded px-3 py-2 text-xs text-white outline-none font-mono focus:border-zinc-500"
+              placeholder={createModal === 'folder' ? 'nama-folder' : 'nama-file.txt'}
+              className="w-full bg-black border border-zinc-700 text-xs text-white p-2 rounded outline-none font-mono"
               autoFocus
             />
-
-            <div className="flex justify-end gap-2 pt-2">
+            <div className="flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setCreateModal(null)}
                 className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white"
               >
-                Cancel
+                Batal
               </button>
               <button
                 type="submit"
                 disabled={!newItemName.trim()}
-                className="px-4 py-1.5 bg-white text-black hover:bg-zinc-200 text-xs font-medium rounded transition-colors disabled:opacity-50"
+                className="px-3 py-1.5 bg-white hover:bg-zinc-200 text-black text-xs font-semibold rounded"
               >
-                Create
+                Buat
               </button>
             </div>
           </form>

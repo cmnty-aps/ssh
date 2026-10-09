@@ -1,5 +1,19 @@
 export type AuthMethod = 'key' | 'password' | 'none';
 
+export type DistroType =
+  | 'ubuntu'
+  | 'debian'
+  | 'alpine'
+  | 'arch'
+  | 'fedora'
+  | 'centos'
+  | 'redhat'
+  | 'kali'
+  | 'suse'
+  | 'darwin'
+  | 'windows'
+  | 'linux';
+
 export interface SshHost {
   id: string;
   label: string;
@@ -10,6 +24,7 @@ export interface SshHost {
   authMethod: AuthMethod;
   keyId?: string;
   password?: string;
+  distro?: DistroType;
   isLocalWorkspace?: boolean;
   probeStatus?: {
     checkedAt: string;
@@ -78,6 +93,7 @@ export const INITIAL_HOSTS: SshHost[] = [
     username: 'root',
     group: 'Local',
     authMethod: 'none',
+    distro: 'debian',
     isLocalWorkspace: true,
     lastConnected: 'Ready',
     probeStatus: {
@@ -160,81 +176,58 @@ export interface ParsedSshConnection {
 export function parseSshConnectionString(raw: string): ParsedSshConnection {
   let text = raw.trim();
 
-  // Strip leading ssh
   if (text.startsWith('ssh ')) {
     text = text.slice(4).trim();
   }
 
   let port = 22;
 
-  // Check for -p <port> or -p<port>
-  const portMatch = text.match(/(?:-p\s*|-P\s*)(\d+)/);
+  const portMatch = text.match(/(?:-p\s*|-P\s*)(\d+)/i);
   if (portMatch) {
     port = parseInt(portMatch[1], 10) || 22;
-    text = text.replace(/(?:-p\s*|-P\s*)\d+/, '').trim();
+    text = text.replace(/(?:-p\s*|-P\s*)\d+/i, '').trim();
   }
 
-  // Remove possible -l <user>
   let username = 'root';
-  const userFlagMatch = text.match(/-l\s+([^\s]+)/);
+  const userFlagMatch = text.match(/-l\s+([^\s]+)/i);
   if (userFlagMatch) {
     username = userFlagMatch[1];
-    text = text.replace(/-l\s+[^\s]+/, '').trim();
+    text = text.replace(/-l\s+[^\s]+/i, '').trim();
   }
 
   let hostname = '';
   let password: string | undefined = undefined;
 
-  // Check for format: user:pass@host or user:pass@host:port
   if (text.includes('@')) {
     const atParts = text.split('@');
     const left = atParts[0].trim();
     const right = atParts.slice(1).join('@').trim();
 
-    // Check if right has :port
     let rightHost = right;
     if (right.includes(':')) {
       const rightCol = right.split(':');
       rightHost = rightCol[0];
       const parsedPort = parseInt(rightCol[1], 10);
-      if (!isNaN(parsedPort)) {
+      if (!isNaN(parsedPort) && parsedPort > 0 && parsedPort <= 65535) {
         port = parsedPort;
       }
     }
 
     if (left.includes(':')) {
-      // user:pass@host
       const [u, p] = left.split(':');
       username = u || 'root';
       password = p;
       hostname = rightHost;
     } else {
-      // Detect if left looks like host/IP (e.g. host@password) or standard user@host
-      const isLeftHostLike = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(left) ||
-        left.includes('.') ||
-        left === 'localhost';
-      const isRightHostLike = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(rightHost) ||
-        rightHost.includes('.') ||
-        rightHost === 'localhost';
-
-      if (isLeftHostLike && !isRightHostLike) {
-        // e.g. "192.168.1.5@mypassword" or "myvps.com@secret"
-        hostname = left;
-        username = 'root';
-        password = right;
-      } else {
-        // standard "user@host"
-        username = left || 'root';
-        hostname = rightHost;
-      }
+      username = left || 'root';
+      hostname = rightHost;
     }
   } else {
-    // No @ sign: could be host:port or host
     if (text.includes(':')) {
       const parts = text.split(':');
       hostname = parts[0];
       const parsedPort = parseInt(parts[1], 10);
-      if (!isNaN(parsedPort)) {
+      if (!isNaN(parsedPort) && parsedPort > 0 && parsedPort <= 65535) {
         port = parsedPort;
       }
     } else {
@@ -249,4 +242,85 @@ export function parseSshConnectionString(raw: string): ParsedSshConnection {
     password,
     label: hostname || 'New Host',
   };
+}
+
+export function validateQuickConnectInput(raw: string): {
+  valid: boolean;
+  error?: string;
+  parsed?: ParsedSshConnection;
+} {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { valid: false, error: 'Masukkan string koneksi SSH.' };
+  }
+
+  if (/[;&|`<>$]/.test(trimmed)) {
+    return { valid: false, error: 'Karakter tidak valid terdeteksi.' };
+  }
+
+  let checkText = trimmed;
+  if (checkText.startsWith('ssh ')) {
+    checkText = checkText.slice(4).trim();
+  }
+
+  const portMatch = checkText.match(/(?:-p\s*|-P\s*)(\d+)/i);
+  if (portMatch) {
+    const p = parseInt(portMatch[1], 10);
+    if (isNaN(p) || p <= 0 || p > 65535) {
+      return { valid: false, error: 'Port SSH harus antara 1 sampai 65535.' };
+    }
+    checkText = checkText.replace(/(?:-p\s*|-P\s*)\d+/i, '').trim();
+  }
+
+  const userFlagMatch = checkText.match(/-l\s+([^\s]+)/i);
+  if (userFlagMatch) {
+    const u = userFlagMatch[1];
+    if (!/^[a-zA-Z0-9_.-]{1,32}$/.test(u)) {
+      return { valid: false, error: 'Format username SSH tidak valid.' };
+    }
+    checkText = checkText.replace(/-l\s+[^\s]+/i, '').trim();
+  }
+
+  if (checkText.includes(' ')) {
+    return {
+      valid: false,
+      error: 'Format tidak valid. Contoh yang benar: root@192.168.1.1 atau user@hostname:22 atau ssh -p 22 root@host',
+    };
+  }
+
+  const parsed = parseSshConnectionString(trimmed);
+
+  if (!parsed.hostname || parsed.hostname.length < 2) {
+    return { valid: false, error: 'Alamat host (IP atau domain) tidak boleh kosong.' };
+  }
+
+  const isIpv4 =
+    /^(\d{1,3}\.){3}\d{1,3}$/.test(parsed.hostname) &&
+    parsed.hostname.split('.').every((oct) => {
+      const num = parseInt(oct, 10);
+      return num >= 0 && num <= 255;
+    });
+
+  const isIpv6 = parsed.hostname.includes(':') && /^[0-9a-fA-F:]+$/.test(parsed.hostname);
+
+  const isDomainOrHost = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/.test(
+    parsed.hostname
+  );
+
+  if (!isIpv4 && !isIpv6 && !isDomainOrHost) {
+    return {
+      valid: false,
+      error: `Hostname "${parsed.hostname}" tidak valid. Gunakan format domain atau IP yang valid.`,
+    };
+  }
+
+  if (!/^[a-zA-Z0-9_.-]{1,32}$/.test(parsed.username)) {
+    return { valid: false, error: `Username "${parsed.username}" tidak valid.` };
+  }
+
+  if (parsed.port <= 0 || parsed.port > 65535) {
+    return { valid: false, error: `Port "${parsed.port}" tidak valid (harus 1-65535).` };
+  }
+
+  return { valid: true, parsed };
 }

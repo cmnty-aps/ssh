@@ -19,7 +19,6 @@ export async function POST(req: NextRequest) {
         privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
       });
 
-      // Extract raw 32-byte Ed25519 public key from ASN.1 SPKI DER (last 32 bytes)
       const rawPubKey = publicKey.subarray(publicKey.length - 32);
       const keyType = Buffer.from('ssh-ed25519', 'utf8');
       const wireBlob = Buffer.concat([encodeSshString(keyType), encodeSshString(rawPubKey)]);

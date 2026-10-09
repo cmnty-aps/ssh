@@ -2,17 +2,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
 
-function resolveFsPath(inputPath?: string | null): string {
-  if (!inputPath || inputPath === '~' || inputPath === '.' || inputPath === '/root') {
+function resolveLocalPath(inputPath?: string | null): string {
+  if (!inputPath || inputPath === '~' || inputPath === '.' || inputPath === '/root' || inputPath === '/root/') {
     return '/root';
   }
   if (inputPath.startsWith('~/')) {
     return path.resolve('/root', inputPath.slice(2));
   }
   if (path.isAbsolute(inputPath)) {
-    return inputPath;
+    return path.normalize(inputPath);
   }
   return path.resolve('/root', inputPath);
+}
+
+function isAllowedLocalPath(resolvedPath: string): boolean {
+  return resolvedPath === '/root' || resolvedPath.startsWith('/root/');
 }
 
 export async function GET(req: NextRequest) {
@@ -20,7 +24,14 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const rawPath = searchParams.get('path');
     const download = searchParams.get('download') === 'true';
-    const targetPath = resolveFsPath(rawPath);
+    const targetPath = resolveLocalPath(rawPath);
+
+    if (!isAllowedLocalPath(targetPath)) {
+      return NextResponse.json(
+        { error: 'EISDIR: illegal operation on a directory, read' },
+        { status: 403 }
+      );
+    }
 
     const stat = await fs.stat(targetPath);
 
@@ -73,15 +84,16 @@ export async function GET(req: NextRequest) {
       })
     );
 
-    // Sort: directories first, then alphabetically
     items.sort((a, b) => {
       if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
 
+    const parent = targetPath === '/root' ? '/root' : path.dirname(targetPath);
+
     return NextResponse.json({
       path: targetPath,
-      parentPath: path.dirname(targetPath),
+      parentPath: parent,
       items,
     });
   } catch (err: unknown) {
@@ -96,7 +108,13 @@ export async function POST(req: NextRequest) {
     const { action } = body;
 
     if (action === 'read') {
-      const filePath = resolveFsPath(body.path);
+      const filePath = resolveLocalPath(body.path);
+      if (!isAllowedLocalPath(filePath)) {
+        return NextResponse.json(
+          { error: 'EISDIR: illegal operation on a directory, read' },
+          { status: 403 }
+        );
+      }
       const content = await fs.readFile(filePath, 'utf-8');
       const stat = await fs.stat(filePath);
       return NextResponse.json({
@@ -107,7 +125,13 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'write') {
-      const filePath = resolveFsPath(body.path);
+      const filePath = resolveLocalPath(body.path);
+      if (!isAllowedLocalPath(filePath)) {
+        return NextResponse.json(
+          { error: 'EISDIR: illegal operation on a directory, read' },
+          { status: 403 }
+        );
+      }
       if (body.isBase64 && typeof body.content === 'string') {
         const buffer = Buffer.from(body.content, 'base64');
         await fs.writeFile(filePath, buffer);
@@ -118,20 +142,38 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'mkdir') {
-      const dirPath = resolveFsPath(body.path);
+      const dirPath = resolveLocalPath(body.path);
+      if (!isAllowedLocalPath(dirPath)) {
+        return NextResponse.json(
+          { error: 'EISDIR: illegal operation on a directory, read' },
+          { status: 403 }
+        );
+      }
       await fs.mkdir(dirPath, { recursive: true });
       return NextResponse.json({ success: true });
     }
 
     if (action === 'delete') {
-      const targetPath = resolveFsPath(body.path);
+      const targetPath = resolveLocalPath(body.path);
+      if (!isAllowedLocalPath(targetPath) || targetPath === '/root') {
+        return NextResponse.json(
+          { error: 'EISDIR: illegal operation on a directory, read' },
+          { status: 403 }
+        );
+      }
       await fs.rm(targetPath, { recursive: true, force: true });
       return NextResponse.json({ success: true });
     }
 
     if (action === 'rename') {
-      const oldPath = resolveFsPath(body.oldPath);
-      const newPath = resolveFsPath(body.newPath);
+      const oldPath = resolveLocalPath(body.oldPath);
+      const newPath = resolveLocalPath(body.newPath);
+      if (!isAllowedLocalPath(oldPath) || !isAllowedLocalPath(newPath)) {
+        return NextResponse.json(
+          { error: 'EISDIR: illegal operation on a directory, read' },
+          { status: 403 }
+        );
+      }
       await fs.rename(oldPath, newPath);
       return NextResponse.json({ success: true });
     }
