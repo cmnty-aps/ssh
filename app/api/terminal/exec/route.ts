@@ -28,6 +28,7 @@ export async function POST(req: NextRequest) {
     const trimmedCmd = command.trim();
     let resolvedCwd = resolveTerminalCwd(cwd);
 
+    // Fallback if directory does not exist
     if (!fs.existsSync(resolvedCwd)) {
       resolvedCwd = '/root';
     }
@@ -36,38 +37,37 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ stdout: '', stderr: '', exitCode: 0, newCwd: resolvedCwd });
     }
 
+    // Handle interactive terminal commands gracefully
+    if (/^(nano|vi|vim)(\s+.*)?$/.test(trimmedCmd)) {
+      return NextResponse.json({
+        stdout: '',
+        stderr: `[Terminal Notice] Interactive editors (${trimmedCmd.split(' ')[0]}) require a full raw TTY.\nTip: Open and edit files with syntax highlighting in the 'Files' tab, or view with 'cat <file>'.`,
+        exitCode: 0,
+        newCwd: resolvedCwd,
+      });
+    }
+
     const startTime = performance.now();
 
+    // Transform commands that require non-interactive batch mode
     let executableCmd = trimmedCmd;
 
-    if (/^top(\s.*)?$/.test(trimmedCmd) && !trimmedCmd.includes('-b')) {
-      executableCmd = 'top -b -n 1 | head -n 35';
+    // Auto-batch 'top' command to avoid TTY error
+    if (/^top(\s.*)?$/.test(trimmedCmd)) {
+      if (!trimmedCmd.includes('-b')) {
+        executableCmd = 'top -b -n 1 | head -n 35';
+      }
     }
 
-    if (/^htop(\s.*)?$/.test(trimmedCmd)) {
-      executableCmd = 'top -b -n 1 | head -n 35';
-    }
-
+    // Auto add -y to apt-get/apt install so it doesn't hang waiting for user stdin
     if (/^apt(-get)?\s+install(\s.*)?$/.test(trimmedCmd) && !trimmedCmd.includes('-y')) {
       executableCmd = trimmedCmd.replace(/^apt(-get)?\s+install/, '$& -y');
     }
 
-    if (/^(nano|vi|vim)(\s+.*)?$/.test(trimmedCmd)) {
-      const parts = trimmedCmd.split(/\s+/);
-      const targetFile = parts.slice(1).join(' ').trim();
-      if (!targetFile) {
-        return NextResponse.json({
-          stdout: `GNU nano 7.2 (Terminal Mode)\n\n[ Untuk mengedit file dengan antarmuka grafis & syntax highlighting lengkap, gunakan tab 'Files'. ]`,
-          stderr: '',
-          exitCode: 0,
-          newCwd: resolvedCwd,
-        });
-      }
-      executableCmd = `cat "${targetFile}" 2>/dev/null || echo "[File baru: ${targetFile}]"`;
-    }
-
+    // Marker to extract new working directory after command runs
     const marker = '___ROOT_SSH_CWD_MARKER___';
-    const wrappedCmd = `/bin/bash -c "script -q -c \\"${executableCmd.replace(/"/g, '\\"')}\\" /dev/null 2>/dev/null || (${executableCmd}); __ROOT_SSH_EXIT=$?; echo \\"${marker}\\$(pwd)\\"; exit \\$__ROOT_SSH_EXIT"`;
+    // Run command in bash, capture exit code, print marker with current directory, and exit with code
+    const wrappedCmd = `${executableCmd}\n__ROOT_SSH_EXIT=$?\necho "${marker}$(pwd)"\nexit $__ROOT_SSH_EXIT`;
 
     return new Promise<NextResponse>((resolve) => {
       exec(
@@ -75,8 +75,8 @@ export async function POST(req: NextRequest) {
         {
           cwd: resolvedCwd,
           shell: '/bin/bash',
-          timeout: 180000,
-          maxBuffer: 15 * 1024 * 1024,
+          timeout: 180000, // 3 minutes for long-running scripts / package installations
+          maxBuffer: 15 * 1024 * 1024, // 15MB buffer
           env: {
             ...process.env,
             PATH: `/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin:/root/.bun/bin:/root/.local/bin:${process.env.PATH || ''}`,
@@ -104,6 +104,7 @@ export async function POST(req: NextRequest) {
             cleanStdout = cleanStdout.slice(0, markerIdx);
           }
 
+          // If directory is invalid, stay at resolvedCwd
           if (!fs.existsSync(newCwd)) {
             newCwd = resolvedCwd;
           }

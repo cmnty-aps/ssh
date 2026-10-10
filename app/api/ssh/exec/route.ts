@@ -39,9 +39,9 @@ export async function POST(req: NextRequest) {
         if (!settled) {
           settled = true;
           conn.end();
-          reject(new Error('SSH command execution timed out (15s limit).'));
+          reject(new Error('SSH command execution timed out (10s limit).'));
         }
-      }, 15000);
+      }, 10000);
 
       conn
         .on('ready', () => {
@@ -50,15 +50,7 @@ export async function POST(req: NextRequest) {
               ? `cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}; echo "__TERMIUS_CWD__$(pwd)"`
               : `${command}; echo "__TERMIUS_CWD__$(pwd)"`;
 
-          const execOptions = {
-            pty: {
-              term: 'xterm-256color',
-              rows: 35,
-              cols: 120,
-            },
-          };
-
-          conn.exec(wrappedCommand, execOptions, (err, stream) => {
+          conn.exec(wrappedCommand, (err, stream) => {
             if (err) {
               clearTimeout(timer);
               settled = true;
@@ -114,7 +106,7 @@ export async function POST(req: NextRequest) {
           username: String(username).trim(),
           password: password ? String(password) : undefined,
           privateKey: privateKey ? String(privateKey) : undefined,
-          readyTimeout: 7000,
+          readyTimeout: 6500,
           hostVerifier: (keyHash: Buffer | string) => {
             serverFingerprint =
               typeof keyHash === 'string'

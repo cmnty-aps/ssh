@@ -16,8 +16,10 @@ export function highlightCode(rawCode: string, lang?: string): string {
     if (lang && hljs.getLanguage(lang)) {
       return hljs.highlight(rawCode, { language: lang, ignoreIllegals: true }).value;
     }
+    // Auto detection
     return hljs.highlightAuto(rawCode).value;
   } catch {
+    // Fallback escaped text
     return rawCode
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')

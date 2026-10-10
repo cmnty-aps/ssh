@@ -34,6 +34,7 @@ export default function SnippetsWorkspace({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
 
+  // Form state
   const [formName, setFormName] = useState('');
   const [formCategory, setFormCategory] = useState<SshSnippet['category']>('System');
   const [formCommand, setFormCommand] = useState('');
@@ -73,6 +74,7 @@ export default function SnippetsWorkspace({
 
   return (
     <div className="flex flex-col h-full w-full bg-zinc-950 text-zinc-100 border border-zinc-800 rounded-none sm:rounded-lg overflow-hidden">
+      {/* Top Header */}
       <div className="flex flex-wrap items-center justify-between border-b border-zinc-800 p-2 sm:p-3 bg-zinc-900/60 gap-2">
         <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none">
           {CATEGORIES.map((cat) => (
@@ -99,6 +101,7 @@ export default function SnippetsWorkspace({
         </button>
       </div>
 
+      {/* Search Bar */}
       <div className="px-3 py-2 border-b border-zinc-800 bg-black flex items-center">
         <Search className="w-3.5 h-3.5 text-zinc-500 mr-2 shrink-0" />
         <input
@@ -110,6 +113,7 @@ export default function SnippetsWorkspace({
         />
       </div>
 
+      {/* Snippet List */}
       <div className="flex-1 overflow-auto p-2.5 sm:p-4 space-y-2 min-h-0 min-w-0">
         {filteredSnippets.length === 0 ? (
           <div className="h-48 flex items-center justify-center text-xs text-zinc-500 font-mono">
@@ -166,6 +170,7 @@ export default function SnippetsWorkspace({
         )}
       </div>
 
+      {/* Add Modal */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-3 sm:p-4">
           <form

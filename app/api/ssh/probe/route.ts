@@ -21,7 +21,6 @@ export async function POST(req: NextRequest) {
       reachable: boolean;
       latencyMs: number;
       banner: string | null;
-      detectedDistro?: string;
       error?: string;
     }>((resolve) => {
       const socket = new net.Socket();
@@ -32,7 +31,6 @@ export async function POST(req: NextRequest) {
         reachable: boolean;
         latencyMs: number;
         banner: string | null;
-        detectedDistro?: string;
         error?: string;
       }) => {
         if (settled) return;
@@ -44,87 +42,25 @@ export async function POST(req: NextRequest) {
       socket.setTimeout(timeoutMs);
 
       socket.on('connect', () => {
-        try {
-          socket.write('SSH-2.0-RemixSSH_1.0\r\n');
-        } catch {}
-
+        const latencyMs = Math.round(performance.now() - startTime);
+        // Wait briefly for SSH protocol identification string (RFC 4253)
         setTimeout(() => {
-          const latencyMs = Math.round(performance.now() - startTime);
-          const rawBanner = bannerData.split(/\r?\n/)[0]?.trim() || '';
-          const banner = rawBanner || 'TCP Port Open (No SSH Banner)';
-          const bLower = banner.toLowerCase();
-
-          let detectedDistro = 'linux';
-          if (bLower.includes('ubuntu')) detectedDistro = 'ubuntu';
-          else if (bLower.includes('debian')) detectedDistro = 'debian';
-          else if (bLower.includes('centos')) detectedDistro = 'centos';
-          else if (bLower.includes('alpine')) detectedDistro = 'alpine';
-          else if (bLower.includes('arch')) detectedDistro = 'arch';
-          else if (bLower.includes('kali')) detectedDistro = 'kali';
-          else if (bLower.includes('fedora')) detectedDistro = 'fedora';
-          else if (
-            bLower.includes('red hat') ||
-            bLower.includes('rhel') ||
-            bLower.includes('redhat') ||
-            bLower.includes('rocky') ||
-            bLower.includes('alma') ||
-            bLower.includes('.el')
-          ) {
-            detectedDistro = 'redhat';
-          } else if (bLower.includes('suse') || bLower.includes('opensuse')) {
-            detectedDistro = 'suse';
-          } else if (bLower.includes('apple') || bLower.includes('darwin')) {
-            detectedDistro = 'darwin';
-          } else if (bLower.includes('windows')) {
-            detectedDistro = 'windows';
-          }
-
           finish({
             reachable: true,
             latencyMs,
-            banner,
-            detectedDistro,
+            banner: bannerData.trim() || 'TCP Port Open (No SSH Banner Sent)',
           });
-        }, 350);
+        }, 450);
       });
 
       socket.on('data', (chunk) => {
         bannerData += chunk.toString('utf8');
         if (bannerData.includes('\n')) {
           const latencyMs = Math.round(performance.now() - startTime);
-          const rawBanner = bannerData.split(/\r?\n/)[0]?.trim() || '';
-          const bLower = rawBanner.toLowerCase();
-
-          let detectedDistro = 'linux';
-          if (bLower.includes('ubuntu')) detectedDistro = 'ubuntu';
-          else if (bLower.includes('debian')) detectedDistro = 'debian';
-          else if (bLower.includes('centos')) detectedDistro = 'centos';
-          else if (bLower.includes('alpine')) detectedDistro = 'alpine';
-          else if (bLower.includes('arch')) detectedDistro = 'arch';
-          else if (bLower.includes('kali')) detectedDistro = 'kali';
-          else if (bLower.includes('fedora')) detectedDistro = 'fedora';
-          else if (
-            bLower.includes('red hat') ||
-            bLower.includes('rhel') ||
-            bLower.includes('redhat') ||
-            bLower.includes('rocky') ||
-            bLower.includes('alma') ||
-            bLower.includes('.el')
-          ) {
-            detectedDistro = 'redhat';
-          } else if (bLower.includes('suse') || bLower.includes('opensuse')) {
-            detectedDistro = 'suse';
-          } else if (bLower.includes('apple') || bLower.includes('darwin')) {
-            detectedDistro = 'darwin';
-          } else if (bLower.includes('windows')) {
-            detectedDistro = 'windows';
-          }
-
           finish({
             reachable: true,
             latencyMs,
-            banner: rawBanner,
-            detectedDistro,
+            banner: bannerData.split(/\r?\n/)[0].trim(),
           });
         }
       });

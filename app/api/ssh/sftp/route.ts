@@ -123,6 +123,7 @@ export async function POST(req: NextRequest) {
                 cleanup({ success: true });
               });
             } else if (action === 'delete') {
+              // Try unlink first, then rmdir
               sftp.unlink(remotePath, (err: unknown) => {
                 if (!err) return cleanup({ success: true });
                 sftp.rmdir(remotePath, (rmErr: unknown) => {

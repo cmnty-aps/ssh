@@ -30,11 +30,13 @@ export default function KeychainWorkspace({
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
 
+  // Keygen state
   const [newKeyLabel, setNewKeyLabel] = useState('');
   const [newKeyAlgo, setNewKeyAlgo] = useState<'ed25519' | 'rsa-4096'>('ed25519');
   const [newKeyComment, setNewKeyComment] = useState('root@localhost');
   const [isGenerating, setIsGenerating] = useState(false);
 
+  // Import state
   const [importLabel, setImportLabel] = useState('');
   const [importPrivKey, setImportPrivKey] = useState('');
   const [importPubKey, setImportPubKey] = useState('');
@@ -125,6 +127,7 @@ export default function KeychainWorkspace({
 
   return (
     <div className="flex flex-col h-full w-full bg-zinc-950 text-zinc-100 border border-zinc-800 rounded-none sm:rounded-lg overflow-hidden">
+      {/* Header Bar */}
       <div className="flex items-center justify-between border-b border-zinc-800 p-3 bg-zinc-900/60 gap-2">
         <div className="flex items-center gap-2">
           <Key className="w-4 h-4 text-zinc-400" />
@@ -150,6 +153,7 @@ export default function KeychainWorkspace({
         </div>
       </div>
 
+      {/* Key List */}
       <div className="flex-1 overflow-auto p-2.5 sm:p-4 space-y-3 min-h-0 min-w-0">
         {keys.length === 0 ? (
           <div className="h-48 flex items-center justify-center text-xs text-zinc-500 font-mono">
@@ -205,6 +209,7 @@ export default function KeychainWorkspace({
                 </div>
               </div>
 
+              {/* Public Key Display */}
               <div className="bg-zinc-950 border border-zinc-900 rounded p-2 text-[11px] font-mono text-zinc-400 break-all select-all">
                 {k.publicKey}
               </div>
@@ -213,6 +218,7 @@ export default function KeychainWorkspace({
         )}
       </div>
 
+      {/* Generate Key Modal */}
       {showGenerateModal && (
         <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-3 sm:p-4">
           <form
@@ -288,6 +294,7 @@ export default function KeychainWorkspace({
         </div>
       )}
 
+      {/* Import Modal */}
       {showImportModal && (
         <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-3 sm:p-4">
           <form
